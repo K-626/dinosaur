@@ -77,7 +77,7 @@ const ORIENTATION_FLASH_DURATION = 24; // 暗転演出のフレーム数
 const ORIENTATION_GRACE_FRAMES = 90;   // 反転直後、障害物が出ない猶予フレーム数
 let orientationFlashFrames = 0;
 function randomizeOrientation() {
-  const rotations = [0, 90, 180, 270];
+  const rotations = [0, 180]; // 90度/270度は表示が崩れるため除外
   let next;
   do {
     next = {
@@ -91,6 +91,21 @@ function randomizeOrientation() {
     next.flipY === orientation.flipY
   );
   orientation = next;
+}
+
+// ---- 見た目のスキン変化(1000点ごとにランダムで切り替わる) ----
+// 'normal': 通常の恐竜プレイヤー / 鳥の敵はプテラノドン
+// 'bird-player': プレイヤーが鳥に、逆に鳥の敵が恐竜になる
+// 'cactus-player': プレイヤーがサボテンになる
+const SKIN_OPTIONS = ['normal', 'bird-player', 'cactus-player'];
+let skinState = 'normal';
+let lastSkinToggleScore = 0;
+function randomizeSkin() {
+  let next;
+  do {
+    next = SKIN_OPTIONS[Math.floor(Math.random() * SKIN_OPTIONS.length)];
+  } while (next === skinState);
+  skinState = next;
 }
 
 // ---- 状態 ----
@@ -206,6 +221,63 @@ const DINO_DUCK_LEGS_B = [
   [12,3,4],[12,15,16]
 ];
 
+// ---- 鳥プレイヤーのピクセルアートグリッド (skin: bird-player) ----
+const BIRD_BODY = [
+  [8,7,15],
+  [9,6,16],
+  [10,6,14],[10,15,18], // くちばし
+  [11,6,16],
+  [12,7,15],
+  [13,8,14]
+];
+const BIRD_EYE = [[9,12,12]];
+const BIRD_WING_UP = [
+  [2,9,10],[3,8,11],[4,7,12],[5,6,13],[6,6,14]
+];
+const BIRD_WING_DOWN = [
+  [13,7,13],[14,8,12],[15,9,11],[16,10,10]
+];
+const BIRD_LEGS = [
+  [19,9,9],[19,13,13],
+  [20,9,9],[20,13,13],
+  [21,8,10],[21,12,14]
+];
+const BIRD_DUCK_BODY = [
+  [0,14,18],
+  [1,12,20],
+  [2,10,22],
+  [3,8,22],
+  [4,6,20],
+  [5,4,18],
+  [6,4,16]
+];
+const BIRD_DUCK_EYE = [[2,17,17]];
+const BIRD_DUCK_LEGS_A = [[7,6,7],[7,14,15],[8,6,7],[8,14,15]];
+const BIRD_DUCK_LEGS_B = [[7,5,6],[7,15,16],[8,5,6],[8,15,16]];
+
+// ---- サボテンプレイヤーのピクセルアートグリッド (skin: cactus-player) ----
+const CACTUS_TRUNK = (() => {
+  const rows = [];
+  for (let r = 0; r <= 22; r++) rows.push([r, 9, 13]);
+  return rows;
+})();
+const CACTUS_ARM_L = [
+  [7,7,8],[8,6,8],[9,5,8],[10,5,8],[11,5,8],[12,5,8],[13,6,8],[14,7,8]
+];
+const CACTUS_ARM_R = [
+  [5,14,16],[6,14,17],[7,14,17],[8,14,17],[9,14,17],[10,14,17],[11,14,16],[12,14,15]
+];
+const CACTUS_EYES = [[3,10,10],[3,12,12]];
+const CACTUS_DUCK_TRUNK = (() => {
+  const rows = [];
+  for (let r = 0; r <= 9; r++) rows.push([r, 4, 20]);
+  return rows;
+})();
+const CACTUS_DUCK_ARMS = [
+  [3,0,2],[4,0,2],[3,22,24],[4,22,24]
+];
+const CACTUS_DUCK_EYES = [[2,9,9],[2,13,13]];
+
 function resetDino() {
   dino.w = STAND_W;
   dino.h = STAND_H;
@@ -297,6 +369,8 @@ function restart() {
   orientation = { rotate: 0, flipX: false, flipY: false };
   lastOrientationToggleScore = 0;
   orientationFlashFrames = 0;
+  skinState = 'normal';
+  lastSkinToggleScore = 0;
   document.body.classList.remove('night');
   colors = DAY;
   resetDino();
@@ -338,6 +412,12 @@ function update() {
     orientationFlashFrames = ORIENTATION_FLASH_DURATION;
   }
   lastOrientationToggleScore = score;
+
+  // 見た目のスキン変化 (1000点ごと)
+  if (Math.floor(score / 1000) !== Math.floor(lastSkinToggleScore / 1000)) {
+    randomizeSkin();
+  }
+  lastSkinToggleScore = score;
 
   if (score > hiScore) hiScore = score;
 
@@ -405,7 +485,29 @@ function drawDino() {
   const x = dino.x, y = dino.y;
   const duckingNow = dino.ducking && !dino.jumping;
 
-  if (duckingNow) {
+  if (skinState === 'bird-player') {
+    if (duckingNow) {
+      drawGrid(BIRD_DUCK_BODY, x, y, colors.fg);
+      drawGrid(dino.runFrame === 0 ? BIRD_DUCK_LEGS_A : BIRD_DUCK_LEGS_B, x, y, colors.fg);
+      drawGrid(BIRD_DUCK_EYE, x, y, colors.bg);
+    } else {
+      drawGrid(BIRD_BODY, x, y, colors.fg);
+      drawGrid(dino.jumping || dino.runFrame === 0 ? BIRD_WING_UP : BIRD_WING_DOWN, x, y, colors.fg);
+      drawGrid(BIRD_LEGS, x, y, colors.fg);
+      drawGrid(BIRD_EYE, x, y, colors.bg);
+    }
+  } else if (skinState === 'cactus-player') {
+    if (duckingNow) {
+      drawGrid(CACTUS_DUCK_TRUNK, x, y, colors.fg);
+      drawGrid(CACTUS_DUCK_ARMS, x, y, colors.fg);
+      drawGrid(CACTUS_DUCK_EYES, x, y, colors.bg);
+    } else {
+      drawGrid(CACTUS_TRUNK, x, y, colors.fg);
+      drawGrid(CACTUS_ARM_L, x, y, colors.fg);
+      drawGrid(CACTUS_ARM_R, x, y, colors.fg);
+      drawGrid(CACTUS_EYES, x, y, colors.bg);
+    }
+  } else if (duckingNow) {
     drawGrid(DINO_DUCK_BODY, x, y, colors.fg);
     drawGrid(dino.runFrame === 0 ? DINO_DUCK_LEGS_A : DINO_DUCK_LEGS_B, x, y, colors.fg);
     drawGrid(DINO_DUCK_EYE, x, y, colors.bg); // 目(背景色でくり抜く)
@@ -425,6 +527,19 @@ function drawObstacle(o) {
       ctx.fillRect(cx, o.y, o.segW * 0.55, o.h);
       ctx.fillRect(cx - 5, o.y + o.h * 0.3, 6, 8);
       ctx.fillRect(cx + o.segW * 0.55 - 1, o.y + o.h * 0.45, 6, 8);
+    }
+  } else if (skinState === 'bird-player') {
+    // 逆に鳥の敵が恐竜になる
+    const flap = o.wingFrame === 0;
+    ctx.fillRect(o.x + 6, o.y + 4, 16, 12);   // 胴体
+    ctx.fillRect(o.x + 18, o.y, 10, 8);       // 頭
+    ctx.fillRect(o.x, o.y + 6, 8, 6);         // 尻尾
+    if (flap) {
+      ctx.fillRect(o.x + 6, o.y + 16, 5, 8);
+      ctx.fillRect(o.x + 16, o.y + 16, 5, 6);
+    } else {
+      ctx.fillRect(o.x + 6, o.y + 16, 5, 6);
+      ctx.fillRect(o.x + 16, o.y + 16, 5, 8);
     }
   } else {
     // 鳥 (プテラノドン風)
