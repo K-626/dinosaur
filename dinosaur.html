@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Dino Runner</title>
+<style>
+  html, body {
+    margin: 0;
+    min-height: 100%;
+    background: #ffffff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Courier New', monospace;
+    transition: background 0.15s;
+  }
+  body.night { background: #000000; }
+  #wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    user-select: none;
+    width: 100%;
+    max-width: 900px;
+    padding: 16px;
+    box-sizing: border-box;
+  }
+  canvas {
+    image-rendering: pixelated;
+    border-bottom: 1px solid #535353;
+    width: 100%;
+    height: auto;
+    display: block;
+    touch-action: manipulation;
+  }
+  body.night canvas { border-bottom-color: #fff; }
+  #hint {
+    color: #999;
+    font-size: 12px;
+    letter-spacing: 1px;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="800" height="230"></canvas>
+  <div id="hint">スペース / ↑ : ジャンプ　　↓ : しゃがむ　　ゲームオーバー時 スペース : リスタート</div>
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const GROUND_Y = 180;
+
+// ---- タッチデバイス判定(スマホでは「しゃがむ」を使わず、タップ=ジャンプのみ) ----
+const isTouchDevice = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+const hintEl = document.getElementById('hint');
+if (isTouchDevice) {
+  hintEl.textContent = 'タップ : ジャンプ　　ゲームオーバー時 タップ : リスタート';
+}
+
+// ---- 色 ----
+let colors = { bg: '#ffffff', fg: '#535353', ground: '#535353' };
+const DAY = { bg: '#ffffff', fg: '#535353', ground: '#535353' };
+const NIGHT = { bg: '#000000', fg: '#ffffff', ground: '#ffffff' };
+let isNight = false;
+let lastNightToggleScore = 0;
+
+// ---- 画面の向き(300点ごとにランダムでミラー/上下反転/90度回転が切り替わる) ----
+let orientation = { rotate: 0, flipX: false, flipY: false };
+let lastOrientationToggleScore = 0;
+const ORIENTATION_FLASH_DURATION = 24; // 暗転演出のフレーム数
+const ORIENTATION_GRACE_FRAMES = 90;   // 反転直後、障害物が出ない猶予フレーム数
+let orientationFlashFrames = 0;
+function randomizeOrientation() {
+  const rotations = [0, 90, 180, 270];
+  let next;
+  do {
+    next = {
+      rotate: rotations[Math.floor(Math.random() * rotations.length)],
+      flipX: Math.random() < 0.5,
+      flipY: Math.random() < 0.5
+    };
+  } while (
+    next.rotate === orientation.rotate &&
+    next.flipX === orientation.flipX &&
+    next.flipY === orientation.flipY
+  );
+  orientation = next;
+}
+
+// ---- 状態 ----
+let speed = 4.5;
+const SPEED_START = 4.5;
+const SPEED_MAX = 13;
+let score = 0;
+let hiScore = 0; // localStorageは使わずメモリ保持のみ
+let gameOver = false;
+let started = false;
+let frameCount = 0;
+
+// ---- 雲 ----
+let clouds = [];
+function spawnCloud() {
+  clouds.push({
+    x: W + Math.random() * 200,
+    y: 20 + Math.random() * 50,
+    w: 46 + Math.random() * 20
+  });
+}
+for (let i = 0; i < 3; i++) spawnCloud();
+
+// ---- 地面のデコ(小石) ----
+let groundBits = [];
+function spawnGroundBit() {
+  groundBits.push({ x: W + Math.random() * W, w: 2 + Math.random() * 8 });
+}
+for (let i = 0; i < 20; i++) spawnGroundBit();
+
+// ---- 恐竜 ----
+const CELL = 2; // ピクセルアートの1マスのサイズ
+const STAND_W = 44;
+const STAND_H = 46;
+const DUCK_W = 52;
+const DUCK_H = 26;
+
+const dino = {
+  x: 44,
+  y: GROUND_Y - STAND_H,
+  w: STAND_W,
+  h: STAND_H,
+  vy: 0,
+  jumping: false,
+  ducking: false,
+  runFrame: 0,
+  runTimer: 0
+};
+const GRAVITY = 0.6;
+const JUMP_VY = -11.5;
+
+// ---- 恐竜のピクセルアートグリッド (行, 開始列, 終了列) ----
+// 実際のChrome恐竜(T-Rex)の頭・開いた口・ギザギザの尻尾・走る脚を再現
+const DINO_BODY = [
+  [0,14,19],
+  [1,13,20],
+  [2,13,20],
+  [3,13,21],
+  [4,13,21],
+  [5,13,17],
+  [6,13,16],[6,18,21],   // 口が開いた顎(上下に分かれる)
+  [7,11,15],
+  [8,10,15],[8,16,17],   // 小さな腕
+  [9,5,6],[9,9,15],      // 尻尾の先端(段差)
+  [10,5,15],
+  [11,5,15],
+  [12,5,15],
+  [13,5,15],
+  [14,5,15],
+  [15,5,15],
+  [16,6,15],
+  [17,6,14],
+  [18,6,14]
+];
+const DINO_EYE = [[1,17,17],[2,17,17]];
+
+const DINO_LEGS_A = [
+  [19,6,8],[19,11,14],
+  [20,6,8],[20,11,14],
+  [21,6,8],[21,11,13],
+  [22,7,8],[22,12,14]
+];
+const DINO_LEGS_B = [
+  [19,6,8],[19,11,14],
+  [20,6,7],[20,11,14],
+  [21,6,8],[21,11,14],
+  [22,6,7],[22,13,14]
+];
+
+const DINO_DUCK_BODY = [
+  [0,18,24],
+  [1,17,25],
+  [2,17,24],
+  [3,2,24],
+  [4,2,24],
+  [5,2,23],
+  [6,2,22],
+  [7,2,20]
+];
+const DINO_DUCK_EYE = [[1,22,22]];
+const DINO_DUCK_LEGS_A = [
+  [8,3,5],[8,15,17],
+  [9,3,5],[9,15,17],
+  [10,3,4],[10,16,17],
+  [11,3,4],[11,16,17],
+  [12,3,4],[12,16,17]
+];
+const DINO_DUCK_LEGS_B = [
+  [8,3,5],[8,15,17],
+  [9,3,4],[9,15,17],
+  [10,3,4],[10,15,17],
+  [11,3,4],[11,15,17],
+  [12,3,4],[12,15,16]
+];
+
+function resetDino() {
+  dino.w = STAND_W;
+  dino.h = STAND_H;
+  dino.y = GROUND_Y - STAND_H;
+  dino.vy = 0;
+  dino.jumping = false;
+  dino.ducking = false;
+}
+
+// ---- 障害物 ----
+let obstacles = [];
+let obstacleTimer = 0;
+
+function nextObstacleGap() {
+  const base = 52 - speed * 1.6;
+  return Math.max(base, 26) + Math.random() * 25;
+}
+let framesUntilNextObstacle = nextObstacleGap();
+
+function spawnObstacle() {
+  const canBird = score > 300 && Math.random() < 0.35;
+  if (canBird) {
+    const heights = [GROUND_Y - 20, GROUND_Y - 46, GROUND_Y - 70];
+    obstacles.push({
+      type: 'bird',
+      x: W + 10,
+      y: heights[Math.floor(Math.random() * heights.length)],
+      w: 34, h: 24,
+      wingFrame: 0, wingTimer: 0
+    });
+  } else {
+    const clusterSize = 1 + Math.floor(Math.random() * 3);
+    const big = Math.random() < 0.5;
+    const w = big ? 22 : 14;
+    const h = big ? 40 : 28;
+    obstacles.push({
+      type: 'cactus',
+      x: W + 10,
+      y: GROUND_Y - h,
+      w: w * clusterSize * 0.7 + w * 0.3,
+      h: h,
+      cluster: clusterSize,
+      segW: w
+    });
+  }
+}
+
+// ---- 入力 ----
+function doJump() {
+  if (!started) { started = true; }
+  if (gameOver) { restart(); return; }
+  if (!dino.jumping) {
+    dino.jumping = true;
+    dino.vy = JUMP_VY;
+  }
+}
+function doDuckStart() {
+  if (!dino.jumping) {
+    dino.ducking = true;
+  }
+}
+function doDuckEnd() {
+  dino.ducking = false;
+}
+
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Space' || e.code === 'ArrowUp') {
+    e.preventDefault();
+    doJump();
+  } else if (e.code === 'ArrowDown') {
+    e.preventDefault();
+    doDuckStart();
+  }
+});
+window.addEventListener('keyup', (e) => {
+  if (e.code === 'ArrowDown') doDuckEnd();
+});
+canvas.addEventListener('mousedown', doJump);
+canvas.addEventListener('touchstart', (e) => { e.preventDefault(); doJump(); }, { passive: false });
+
+function restart() {
+  speed = SPEED_START;
+  score = 0;
+  obstacles = [];
+  framesUntilNextObstacle = nextObstacleGap();
+  gameOver = false;
+  isNight = false;
+  lastNightToggleScore = 0;
+  orientation = { rotate: 0, flipX: false, flipY: false };
+  lastOrientationToggleScore = 0;
+  orientationFlashFrames = 0;
+  document.body.classList.remove('night');
+  colors = DAY;
+  resetDino();
+}
+
+// ---- 更新 ----
+function update() {
+  frameCount++;
+
+  // 雲
+  clouds.forEach(c => c.x -= speed * 0.2);
+  clouds = clouds.filter(c => c.x + c.w > 0);
+  if (Math.random() < 0.006) spawnCloud();
+
+  // 地面の小石
+  groundBits.forEach(b => b.x -= speed);
+  groundBits = groundBits.filter(b => b.x + b.w > 0);
+  if (Math.random() < 0.04) spawnGroundBit();
+
+  if (!started || gameOver) return;
+
+  // スコア & 速度
+  score += 0.1;
+  if (speed < SPEED_MAX) speed += 0.0015;
+
+  // 昼夜反転 (500点ごと)
+  if (Math.floor(score / 500) !== Math.floor(lastNightToggleScore / 500)) {
+    isNight = !isNight;
+    colors = isNight ? NIGHT : DAY;
+    document.body.classList.toggle('night', isNight);
+  }
+  lastNightToggleScore = score;
+
+  // 画面の向き変化 (300点ごと)
+  if (Math.floor(score / 300) !== Math.floor(lastOrientationToggleScore / 300)) {
+    randomizeOrientation();
+    obstacles = [];
+    framesUntilNextObstacle = ORIENTATION_GRACE_FRAMES;
+    orientationFlashFrames = ORIENTATION_FLASH_DURATION;
+  }
+  lastOrientationToggleScore = score;
+
+  if (score > hiScore) hiScore = score;
+
+  if (orientationFlashFrames > 0) orientationFlashFrames--;
+
+  // 恐竜の物理
+  const duckingNow = dino.ducking && !dino.jumping;
+  dino.w = duckingNow ? DUCK_W : STAND_W;
+  dino.h = duckingNow ? DUCK_H : STAND_H;
+  if (dino.jumping) {
+    dino.vy += GRAVITY;
+    dino.y += dino.vy;
+    if (dino.y >= GROUND_Y - STAND_H) {
+      dino.y = GROUND_Y - STAND_H;
+      dino.jumping = false;
+      dino.vy = 0;
+    }
+  } else {
+    dino.y = GROUND_Y - dino.h;
+  }
+
+  // 走るアニメーション
+  dino.runTimer++;
+  if (dino.runTimer > 6) {
+    dino.runTimer = 0;
+    dino.runFrame = dino.runFrame === 0 ? 1 : 0;
+  }
+
+  // 障害物
+  framesUntilNextObstacle -= 1;
+  if (framesUntilNextObstacle <= 0) {
+    spawnObstacle();
+    framesUntilNextObstacle = nextObstacleGap();
+  }
+  obstacles.forEach(o => {
+    o.x -= speed;
+    if (o.type === 'bird') {
+      o.wingTimer++;
+      if (o.wingTimer > 10) { o.wingTimer = 0; o.wingFrame = o.wingFrame === 0 ? 1 : 0; }
+    }
+  });
+  obstacles = obstacles.filter(o => o.x + o.w > -5);
+
+  // 当たり判定
+  const dHeight = dino.ducking ? DUCK_H : STAND_H;
+  const dBox = { x: dino.x + 6, y: dino.y + 4, w: dino.w - 12, h: dHeight - 8 };
+  for (const o of obstacles) {
+    const oBox = { x: o.x + 3, y: o.y + 3, w: o.w - 6, h: o.h - 6 };
+    if (dBox.x < oBox.x + oBox.w && dBox.x + dBox.w > oBox.x &&
+        dBox.y < oBox.y + oBox.h && dBox.y + dBox.h > oBox.y) {
+      gameOver = true;
+    }
+  }
+}
+
+// ---- 描画 ----
+function drawGrid(rects, x, y, color) {
+  ctx.fillStyle = color;
+  rects.forEach(([row, c0, c1]) => {
+    ctx.fillRect(x + c0 * CELL, y + row * CELL, (c1 - c0 + 1) * CELL, CELL);
+  });
+}
+
+function drawDino() {
+  const x = dino.x, y = dino.y;
+  const duckingNow = dino.ducking && !dino.jumping;
+
+  if (duckingNow) {
+    drawGrid(DINO_DUCK_BODY, x, y, colors.fg);
+    drawGrid(dino.runFrame === 0 ? DINO_DUCK_LEGS_A : DINO_DUCK_LEGS_B, x, y, colors.fg);
+    drawGrid(DINO_DUCK_EYE, x, y, colors.bg); // 目(背景色でくり抜く)
+  } else {
+    drawGrid(DINO_BODY, x, y, colors.fg);
+    const legs = dino.jumping ? DINO_LEGS_A : (dino.runFrame === 0 ? DINO_LEGS_A : DINO_LEGS_B);
+    drawGrid(legs, x, y, colors.fg);
+    drawGrid(DINO_EYE, x, y, colors.bg); // 目(背景色でくり抜く)
+  }
+}
+
+function drawObstacle(o) {
+  ctx.fillStyle = colors.fg;
+  if (o.type === 'cactus') {
+    for (let i = 0; i < o.cluster; i++) {
+      const cx = o.x + i * (o.segW * 0.7);
+      ctx.fillRect(cx, o.y, o.segW * 0.55, o.h);
+      ctx.fillRect(cx - 5, o.y + o.h * 0.3, 6, 8);
+      ctx.fillRect(cx + o.segW * 0.55 - 1, o.y + o.h * 0.45, 6, 8);
+    }
+  } else {
+    // 鳥 (プテラノドン風)
+    ctx.fillRect(o.x + 10, o.y + 8, 16, 8); // 胴体
+    ctx.fillRect(o.x + 22, o.y + 6, 8, 6);  // 頭
+    if (o.wingFrame === 0) {
+      ctx.fillRect(o.x, o.y, 14, 6);
+      ctx.fillRect(o.x + 18, o.y, 12, 6);
+    } else {
+      ctx.fillRect(o.x + 2, o.y + 14, 12, 6);
+      ctx.fillRect(o.x + 20, o.y + 14, 12, 6);
+    }
+  }
+}
+
+function drawGround() {
+  ctx.strokeStyle = colors.ground;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, GROUND_Y);
+  ctx.lineTo(W, GROUND_Y);
+  ctx.stroke();
+  ctx.fillStyle = colors.ground;
+  groundBits.forEach(b => {
+    ctx.fillRect(b.x, GROUND_Y + 3, b.w, 2);
+  });
+}
+
+function drawClouds() {
+  if (isNight) return;
+  ctx.fillStyle = '#c8c8c8';
+  clouds.forEach(c => {
+    ctx.fillRect(c.x, c.y, c.w, 8);
+    ctx.fillRect(c.x + 8, c.y - 5, c.w - 20, 6);
+  });
+}
+
+function drawScore() {
+  ctx.fillStyle = colors.fg;
+  ctx.font = '16px "Courier New", monospace';
+  ctx.textAlign = 'right';
+  const scoreStr = Math.floor(score).toString().padStart(5, '0');
+  const hiStr = Math.floor(hiScore).toString().padStart(5, '0');
+  ctx.fillText('HI ' + hiStr + '   ' + scoreStr, W - 10, 20);
+}
+
+function drawStartMessage() {
+  if (started) return;
+  ctx.fillStyle = colors.fg;
+  ctx.font = '16px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(isTouchDevice ? 'タップでスタート' : 'スペースキーでスタート', W / 2, 60);
+}
+
+function drawGameOver() {
+  if (!gameOver) return;
+  ctx.fillStyle = colors.fg;
+  ctx.font = 'bold 20px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('G A M E   O V E R', W / 2, 80);
+  ctx.font = '14px "Courier New", monospace';
+  ctx.fillText(isTouchDevice ? 'タップでリスタート' : 'スペースキーでリスタート', W / 2, 104);
+}
+
+function applyOrientation() {
+  const rotated90 = orientation.rotate === 90 || orientation.rotate === 270;
+  const targetW = rotated90 ? H : W;
+  const targetH = rotated90 ? W : H;
+  if (canvas.width !== targetW || canvas.height !== targetH) {
+    canvas.width = targetW;
+    canvas.height = targetH;
+  }
+  ctx.save();
+  ctx.translate(canvas.width / 2, canvas.height / 2);
+  ctx.rotate(orientation.rotate * Math.PI / 180);
+  ctx.scale(orientation.flipX ? -1 : 1, orientation.flipY ? -1 : 1);
+  ctx.translate(-W / 2, -H / 2);
+}
+
+function drawOrientationFlash() {
+  if (orientationFlashFrames <= 0) return;
+  // 反転直後にサッと暗くなり、フェードして消える演出(夜反転の暗転風)
+  const t = orientationFlashFrames / ORIENTATION_FLASH_DURATION;
+  const alpha = Math.sin(t * Math.PI) * 0.85;
+  ctx.fillStyle = 'rgba(0,0,0,' + alpha + ')';
+  ctx.fillRect(0, 0, W, H);
+}
+
+function draw() {
+  applyOrientation();
+
+  ctx.fillStyle = colors.bg;
+  ctx.fillRect(0, 0, W, H);
+
+  drawClouds();
+  drawGround();
+  drawDino();
+  obstacles.forEach(drawObstacle);
+  drawScore();
+  drawStartMessage();
+  drawGameOver();
+  drawOrientationFlash();
+
+  ctx.restore();
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+resetDino();
+loop();
+</script>
+</body>
+</html>
